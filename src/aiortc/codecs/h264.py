@@ -193,6 +193,10 @@ class H264Encoder(Encoder):
 
     @staticmethod
     def _split_bitstream(buf: bytes) -> Iterator[bytes]:
+
+        if buf == b'':
+            return b''
+
         # TODO: write in a more pytonic way,
         # translate from: https://github.com/aizvorski/h264bitstream/blob/master/h264_nal.c#L134
         i = 0
@@ -245,27 +249,47 @@ class H264Encoder(Encoder):
             self.codec = None
 
         if self.codec is None:
-            self.codec = av.CodecContext.create("libx264", "w")
+            self.codec = av.CodecContext.create("h264_vaapi", "w")
             self.codec.width = frame.width
             self.codec.height = frame.height
-            self.codec.pix_fmt = "yuv420p"
+            self.codec.pix_fmt = "vaapi"
             self.codec.time_base = fractions.Fraction(1, MAX_FRAME_RATE)
             self.codec.options = {
-                "profile": "baseline",
-                "level": "31",
-                "tune": "zerolatency",
+                #"profile": "baseline",
+                #"level": "31",
+                #"tune": "zerolatency",
             }
 
-        packages = self.codec.encode(frame)
-        yield from self._split_bitstream(b"".join(p.to_bytes() for p in packages))
+            hwdevice_ctx = av.HWDeviceContext.create("VAAPI", "/dev/dri/renderD128")
+            hwframes_ctx = av.HWFramesContext.create(hwdevice_ctx)
+            hwframes_ctx.format = "vaapi"
+            hwframes_ctx.sw_format = "nv12"
+            hwframes_ctx.width = self.codec.width
+            hwframes_ctx.height = self.codec.height
+            hwframes_ctx.initial_pool_size = 20
+            hwframes_ctx.init()
+
+            self.codec.hw_frames_ctx = hwframes_ctx
+
+            try:
+                packages = self.codec.encode(frame)
+            except Exception as e:
+                print('a', e)
+            try:
+                yield from self._split_bitstream(b"".join(p.to_bytes() for p in packages))
+            except Exception as e:
+                print('b', e)
 
     def encode(
         self, frame: Frame, force_keyframe: bool = False
     ) -> Tuple[List[bytes], int]:
         assert isinstance(frame, av.VideoFrame)
-        packages = self._encode_frame(frame, force_keyframe)
-        timestamp = convert_timebase(frame.pts, frame.time_base, VIDEO_TIME_BASE)
-        return self._packetize(packages), timestamp
+        try:
+            packages = self._encode_frame(frame, force_keyframe)
+            timestamp = convert_timebase(frame.pts, frame.time_base, VIDEO_TIME_BASE)
+            return self._packetize(packages), timestamp
+        except Exception as e:
+            print('oups', e)
 
 
 def h264_depayload(payload: bytes) -> bytes:
